@@ -1,0 +1,49 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual Environment
+env/
+venv/
+.venv/
+
+# Logs & Temp Files
+*.log
+*.txt.bak
+uvicorn.log
+server_logs.txt
+install_log.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+
+.env
+/env
+
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts & JSON data dumps
+customer.json
+product.json
+test_*.py
+
+# Streamlit cache
+.streamlit/
