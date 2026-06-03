@@ -31,11 +31,6 @@ install_log.txt
 *.swp
 *.swo
 
-
-.env
-/env
-
-
 # OS
 .DS_Store
 Thumbs.db
@@ -45,5 +40,5 @@ customer.json
 product.json
 test_*.py
 
-# Streamlit cache
-.streamlit/
+# Gemini brain
+.gemini/

@@ -298,6 +298,17 @@ async def resolve_product(customer_id: int, query: str) -> dict:
         ]
         if unit_match:
             unit_filtered = unit_match
+    elif qty is not None:
+        # Smart deduction: If the user provides a pure number without a unit (e.g., "5 lemons"),
+        # and there is an "each" or "ea" variant available, instinctively prefer that variant.
+        ea_variants = [
+            r for r in filtered
+            if r["order_unit"] and any(u in r["order_unit"].lower() for u in ["ea", "each", "piece", "pc"])
+        ]
+        if ea_variants:
+            unit_filtered = ea_variants
+            norm_unit = "ea"
+            raw_unit = "ea"
 
     # Step 6: Group by product family
     family_groups: dict[str, list] = {}
