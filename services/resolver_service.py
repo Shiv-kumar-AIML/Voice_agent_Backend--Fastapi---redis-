@@ -359,10 +359,36 @@ async def resolve_product(customer_id: int, query: str) -> dict:
                 "confidence": 0.95,
             }
         else:
-            options = [
-                {"product_id": r["product_id"], "name": r["name"], "unit": r["order_unit"] or ""}
-                for r in candidates[:8]
-            ]
+            options = []
+            for r in candidates[:8]:
+                name_display = r["name"]
+                norm_qty = None
+                if qty is not None and factor:
+                    norm_qty = round(qty * factor, 4)
+                min_qty = r.get("min_order_qty")
+                try:
+                    min_qty = float(min_qty) if min_qty is not None else 1.0
+                except:
+                    min_qty = 1.0
+
+                is_valid = True
+                if norm_unit in WHOLE_UNITS and qty is not None and qty != int(qty):
+                    is_valid = False
+                    name_display += f" (Note: {qty} invalid, whole numbers only)"
+                elif norm_qty is not None and min_qty > 0:
+                    remainder = round((norm_qty % min_qty), 4)
+                    if remainder != 0 and remainder != min_qty:
+                        is_valid = False
+                        name_display += f" (Note: {norm_qty} invalid, requires multiples of {min_qty})"
+                
+                if is_valid and min_qty > 1:
+                    name_display += f" (Multiples of {min_qty} {r['order_unit']})"
+                    
+                options.append({
+                    "product_id": r["product_id"],
+                    "name": name_display,
+                    "unit": r["order_unit"] or ""
+                })
             return {
                 "status": "clarification_required",
                 "product_family": family_key,
@@ -373,9 +399,32 @@ async def resolve_product(customer_id: int, query: str) -> dict:
     options = []
     for family, cands in list(family_groups.items())[:8]:
         r = cands[0]
+        name_display = r["name"]
+        norm_qty = None
+        if qty is not None and factor:
+            norm_qty = round(qty * factor, 4)
+        min_qty = r.get("min_order_qty")
+        try:
+            min_qty = float(min_qty) if min_qty is not None else 1.0
+        except:
+            min_qty = 1.0
+
+        is_valid = True
+        if norm_unit in WHOLE_UNITS and qty is not None and qty != int(qty):
+            is_valid = False
+            name_display += f" (Note: {qty} invalid, whole numbers only)"
+        elif norm_qty is not None and min_qty > 0:
+            remainder = round((norm_qty % min_qty), 4)
+            if remainder != 0 and remainder != min_qty:
+                is_valid = False
+                name_display += f" (Note: {norm_qty} invalid, requires multiples of {min_qty})"
+        
+        if is_valid and min_qty > 1:
+            name_display += f" (Multiples of {min_qty} {r['order_unit']})"
+            
         options.append({
             "product_id": r["product_id"], 
-            "name": r["name"], 
+            "name": name_display, 
             "unit": r["order_unit"] or ""
         })
 

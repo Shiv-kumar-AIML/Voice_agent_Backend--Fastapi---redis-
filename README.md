@@ -1,11 +1,11 @@
 # B2B Voice Ordering Agent Backend
 
-A robust FastAPI backend designed to power conversational AI voice agents (like Vapi) for wholesale B2B product ordering. This backend seamlessly handles business identification, fuzzy product search, strictly-validated cart building, unit conversions, and order placement.
+A robust FastAPI backend designed to power conversational AI voice agents (like Vapi) for wholesale B2B product ordering. This backend seamlessly handles business identification, fuzzy product search, strictly-validated cart building, unit conversions, and order placement. It operates on a lightweight, fast local SQLite database.
 
 ## Features
 
 - **Conversational Product Discovery:** Built-in recommendations (`/products/recommend`) that supports both top-level category exploration and specific item suggestions.
-- **Intelligent Product Resolution:** Fuzzy matching and semantic unit conversion via the `/products/resolve` endpoint.
+- **Intelligent Product Resolution:** Fuzzy matching and semantic unit conversion via the `/products/resolve` endpoint, complete with quantity validation limits and inline LLM clarification notes.
 - **Cart Management:** Endpoints for instantly adding and removing items with built-in enforcement of minimum order quantities safely handled on the backend.
 - **Hardened Validation:** Blocks actions without a validated `customer_id` and strictly rejects mathematical impossibilities (like fractional carton ordering).
 - **VAPI Optimized:** Carefully engineered system prompt (`vapi_system_prompt.md`) ensuring zero filler words and 100% adherence to API JSON outcomes.
@@ -15,10 +15,14 @@ A robust FastAPI backend designed to power conversational AI voice agents (like 
 ```text
 voice_agent_backend/
 ├── api/                  # FastAPI router endpoints (products, cart, customer, order)
-├── core/                 # Database configuration (PostgreSQL/asyncpg) and Redis links
+├── core/                 # Database configuration (aiosqlite) and Redis links
+├── data/                 # SQLite database file and JSON seed payloads
+├── frontend/             # Frontend client assets
+├── logs/                 # Runtime logs for the server and installation
 ├── models/               # Pydantic schemas enforcing input/output validation
+├── scripts/              # Utility scripts for database initialization and local data sync
 ├── services/             # Core business logic containing the resolver and validation algorithms
-├── scripts/              # Utility scripts for database initialization and testing
+├── tests/                # Testing scripts
 ├── vapi_system_prompt.md # The strictly-tuned persona and instruction set for the Voice LLM
 └── main.py               # Application entry point
 ```
@@ -28,19 +32,17 @@ voice_agent_backend/
 ### 1. Prerequisites
 
 - Python 3.10+
-- PostgreSQL
-- Redis (if session caching is implemented)
+- Redis (runs in the background for session caching and active carts)
 
 ### 2. Environment Variables
 
-Create a `.env` file in the root directory (or ensure your environment variables are exported) containing your database credentials:
+Create a `.env` file in the root directory (or ensure your environment variables are exported):
 
 ```env
-DB_USER=your_db_user
-DB_PASSWORD=your_db_password
-DB_HOST=127.0.0.1
-DB_PORT=5432
-DB_NAME=ai_voice_ordering_db
+DATABASE_PATH=./data/voice_agent.db
+
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
 ```
 
 ### 3. Installation
@@ -53,21 +55,29 @@ pip install -r requirements.txt
 
 ### 4. Database Setup
 
-If you need to initialize or recreate the necessary tables (`customers`, `products`, etc.), run the setup script:
+To initialize the necessary tables (`customers`, `products`, etc.) using SQLite, run the schema recreation script:
 
 ```bash
 python scripts/recreate_db.py
 ```
 
-### 5. Running the Development Server
-
-Use the FastAPI CLI to start the development server:
+Then, populate the database with product and customer records from the local JSON files:
 
 ```bash
-fastapi dev main.py
+python scripts/sync_local.py
 ```
 
-The server will run on `http://127.0.0.1:8000`. API documentation is available automatically at `http://127.0.0.1:8000/docs`.
+### 5. Running the API Server
+
+Use the FastAPI CLI (which now runs under standard Uvicorn commands) to start the server:
+
+```bash
+fastapi run main.py --host 0.0.0.0
+```
+
+*(For local development with reloading, use `fastapi dev main.py`)*
+
+The server will be available at `http://localhost:8000`. API documentation is generated automatically at `http://localhost:8000/docs`.
 
 ---
 
@@ -79,21 +89,19 @@ The server will run on `http://127.0.0.1:8000`. API documentation is available a
 
 ### Products
 
-- **GET `/products/recommend`**:
-  - *No query arguments*: Returns a generic list of top-level categories.
-  - *With `?query=x`*: Fuzzy searches the database and returns specific products matching the query.
-- **GET `/products/{product_id}`**: Retrieves specific physical constraints and descriptions of a single item.
-- **POST `/products/resolve`**: Deeply translates raw spoken strings (e.g. "half a kilo of green apples") into normalized backend configurations mapped to `product_id`.
+- **GET `/products/recommend`**: Returns general product categories or specific items based on queries.
+- **GET `/products/{product_id}`**: Retrieves specific details for an item.
+- **POST `/products/resolve`**: Deeply translates raw spoken strings (e.g., "3.3 kilos of roasted vegetables") into normalized configurations, identifies ambiguities, and enforces `min_order_qty` directly before the cart stage.
 
 ### Cart
 
 - **POST `/cart/add`**: Appends products enforcing database integer unit rules.
-- **POST `/cart/remove`**: Deletes items from the session cart.
+- **POST `/cart/remove`**: Deletes items from the session cart via Redis.
 - **GET `/cart/summary`**: Recaps all items pending checkout.
 
 ### Orders
 
-- **POST `/order/place`**: Finalizes the session cart and commits the transaction to the database.
+- **POST `/order/place`**: Finalizes the session cart and places the order.
 
 ---
 
@@ -101,5 +109,5 @@ The server will run on `http://127.0.0.1:8000`. API documentation is available a
 
 This backend is designed exclusively to be consumed by an LLM via tool-calling.
 
-1. **System Prompt**: Copy the exact contents of `vapi_system_prompt.md` into your agent's system prompt configuration. It includes strict guardrails against over-explanation and filler phrases.
+1. **System Prompt**: Copy the exact contents of `vapi_system_prompt.md` into your agent's system prompt configuration. It includes strict guardrails handling clarification logic safely.
 2. **Tools Configuration**: Configure each FastAPI route as a Custom Tool in your Vapi dashboard. Ensure all input/output fields match the exact schemas defined in the Swagger UI (`/docs`). For `/products/recommend`, explicitly ensure the `query` variable argument is set to **optional**.
