@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
-asyncpg
+aiosqlite
 redis[hiredis]
 python-dotenv
 pydantic

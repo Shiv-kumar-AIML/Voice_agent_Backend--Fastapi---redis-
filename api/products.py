@@ -4,7 +4,7 @@ from models.schemas import (
     ProductRecommendResponse, ProductRecommendItem, ProductDetailsResponse
 )
 from services.resolver_service import resolve_product
-from core.database import get_pool
+from core.database import get_db
 from typing import Optional
 
 router = APIRouter(prefix="/products", tags=["Products"])
@@ -12,10 +12,9 @@ router = APIRouter(prefix="/products", tags=["Products"])
 @router.post("/resolve", response_model=ResolveResponse)
 async def product_resolve(req: ResolveRequest):
     result = await resolve_product(req.customer_id, req.query)
-    
-    # Map result to schema
+
     status = result.get("status")
-    
+
     if status == "matched":
         return ResolveResponse(
             status="matched",
@@ -43,59 +42,59 @@ async def product_resolve(req: ResolveRequest):
         )
 
 @router.get("/recommend", response_model=ProductRecommendResponse)
-async def recommend_products(query: Optional[str] = Query(None, description="Category or search term for recommendation")):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        if not query or query.strip() == "":
-            rows = await conn.fetch('''
-                SELECT DISTINCT category 
-                FROM products 
-                WHERE is_active = true AND category IS NOT NULL
-                LIMIT 10
-            ''')
-            return ProductRecommendResponse(
-                type="categories",
-                categories=[r["category"] for r in rows if r["category"]]
-            )
-        else:
-            q = f"%{query}%"
-            rows = await conn.fetch('''
-                SELECT product_id, name, description, category, order_unit 
-                FROM products 
-                WHERE is_active = true 
-                AND (category ILIKE $1 OR name ILIKE $1 OR description ILIKE $1)
-                LIMIT 5
-            ''')
-            
-            items = []
-            for r in rows:
-                items.append(ProductRecommendItem(
-                    product_id=r["product_id"],
-                    name=r["name"],
-                    description=r["description"],
-                    category=r["category"],
-                    order_unit=r["order_unit"]
-                ))
-            return ProductRecommendResponse(type="products", items=items)
+async def recommend_products(query: Optional[str] = Query(None, description="Category or search term")):
+    db = get_db()
+    if not query or query.strip() == "":
+        cursor = await db.execute("""
+            SELECT DISTINCT category 
+            FROM products 
+            WHERE is_active = 1 AND category IS NOT NULL
+            LIMIT 10
+        """)
+        rows = await cursor.fetchall()
+        return ProductRecommendResponse(
+            type="categories",
+            categories=[r["category"] for r in rows if r["category"]]
+        )
+    else:
+        q = f"%{query}%"
+        cursor = await db.execute("""
+            SELECT product_id, name, description, category, order_unit 
+            FROM products 
+            WHERE is_active = 1 
+            AND (category LIKE ? OR name LIKE ? OR description LIKE ?)
+            LIMIT 5
+        """, (q, q, q))
+        rows = await cursor.fetchall()
+
+        items = []
+        for r in rows:
+            items.append(ProductRecommendItem(
+                product_id=r["product_id"],
+                name=r["name"],
+                description=r["description"],
+                category=r["category"],
+                order_unit=r["order_unit"]
+            ))
+        return ProductRecommendResponse(type="products", items=items)
 
 @router.get("/{product_id}", response_model=ProductDetailsResponse)
 async def get_product_details(product_id: int):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow('''
-            SELECT product_id, name, description, category, order_unit, min_order_qty 
-            FROM products 
-            WHERE product_id = $1 AND is_active = true
-        ''', product_id)
-        if not row:
-            raise HTTPException(status_code=404, detail="Product not found")
-            
-        return ProductDetailsResponse(
-            product_id=row["product_id"],
-            name=row["name"],
-            description=row["description"],
-            category=row["category"],
-            order_unit=row["order_unit"],
-            # Convert decimal to float if necessary, though Decimal is supported by Pydantic mostly.
-            min_order_qty=float(row["min_order_qty"]) if row["min_order_qty"] is not None else None
-        )
+    db = get_db()
+    cursor = await db.execute("""
+        SELECT product_id, name, description, category, order_unit, min_order_qty 
+        FROM products 
+        WHERE product_id = ? AND is_active = 1
+    """, (product_id,))
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    return ProductDetailsResponse(
+        product_id=row["product_id"],
+        name=row["name"],
+        description=row["description"],
+        category=row["category"],
+        order_unit=row["order_unit"],
+        min_order_qty=float(row["min_order_qty"]) if row["min_order_qty"] is not None else None
+    )

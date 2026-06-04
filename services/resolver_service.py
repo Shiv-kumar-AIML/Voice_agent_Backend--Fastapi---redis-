@@ -5,7 +5,7 @@ The brain of the voice ordering system.
 Flow:
 1. Extract quantity + unit from query using regex
 2. Strip quantity/unit from query to get the clean product name text
-3. Search products using ILIKE + pg_trgm fuzzy on name
+3. Search products using LIKE + difflib fuzzy on name
 4. Filter results to only those in the customer's Redis allowed_products set
 5. Determine if we have: exact/confident match, clarification_required (multiple families), or not_found
 """
@@ -14,11 +14,10 @@ import re
 import asyncio
 from functools import partial
 from typing import Optional
-from core.database import get_pool
+from core.database import get_db
 from core.redis_client import get_customer_allowed_products
 
 # ── Unit Conversion Table ─────────────────────────────────────────────────────
-# Maps user-spoken unit variants → (normalized_unit, conversion_factor_to_base)
 UNIT_MAP = {
     # Weight
     "kg":     ("kg", 1.0),
@@ -132,14 +131,12 @@ def extract_product_family_from_name(name: str) -> str:
     E.g. "APPLES GREEN PER KG" → "APPLES GREEN"
          "PEACHES PER 5KG CTN" → "PEACHES"
     """
-    # Remove unit-like tokens and PER/x from end
     stripped = re.sub(
         r"\s+(per\s+)?(\d+\s*)?(kg|g|l|ml|ctn|pk|btl|pun|bag|box|ea|each|doz|dozen|piece|pieces|lb|lbs)\s*$",
         "",
         name,
         flags=re.IGNORECASE,
     ).strip()
-    # Also remove "PER" from tail if it remains
     stripped = re.sub(r"\s+PER\s*$", "", stripped, flags=re.IGNORECASE).strip()
     return stripped.upper()
 
@@ -147,10 +144,6 @@ def extract_product_family_from_name(name: str) -> str:
 def _difflib_fuzzy_match(product_text: str, candidates: list[dict], cutoff: float = 0.50) -> list[dict]:
     """
     Intelligent fuzzy matching.
-    Calculates score based on:
-    1. Difflib ratio between query and tokens.
-    2. First-letter match bonus (typos rarely change the starting phonetic character).
-    3. Prefix matching bonus.
     """
     import difflib
     query_lower = product_text.lower().strip()
@@ -167,17 +160,14 @@ def _difflib_fuzzy_match(product_text: str, candidates: list[dict], cutoff: floa
         for tok in tokens:
             base_score = difflib.SequenceMatcher(None, query_lower, tok).ratio()
             
-            # Massive bonus for first character match, or heavy penalty if mismatch
             if tok and query_lower[0] == tok[0]:
                 base_score += 0.20
             else:
-                base_score -= 0.30  # Crucial for filtering distinct words
-            
-            # Bonus if one is a prefix of another
+                base_score -= 0.30
+
             if tok.startswith(query_lower) or query_lower.startswith(tok):
                 base_score += 0.15
                 
-            # Penalty if lengths are vastly different and it's not a prefix
             if not tok.startswith(query_lower):
                 len_diff = abs(len(tok) - q_len)
                 if len_diff > 3:
@@ -185,7 +175,6 @@ def _difflib_fuzzy_match(product_text: str, candidates: list[dict], cutoff: floa
 
             best_token_score = max(best_token_score, base_score)
 
-        # Full string comparison as backup
         full_score = difflib.SequenceMatcher(None, query_lower, name).ratio()
         if query_lower[0] == name[0]:
             full_score += 0.10
@@ -201,12 +190,19 @@ def _difflib_fuzzy_match(product_text: str, candidates: list[dict], cutoff: floa
     return [row for _, row in scored]
 
 
+async def _fetch_rows(sql: str, params: tuple = ()) -> list[dict]:
+    """Helper: execute SQL and return list of dicts."""
+    db = get_db()
+    cursor = await db.execute(sql, params)
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
 async def resolve_product(customer_id: int, query: str) -> dict:
     """
     Core resolver function.
     Returns a dict matching ResolveResponse schema.
     """
-    pool = get_pool()
 
     # Step 1: Quantity + Unit extraction
     qty, raw_unit, product_text = extract_quantity_unit(query)
@@ -219,52 +215,49 @@ async def resolve_product(customer_id: int, query: str) -> dict:
 
     rows = []
 
-    # ── Layer 1: ILIKE substring match ────────────────────────────────────
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT product_id, name, order_unit, min_order_qty
-            FROM products
-            WHERE is_active = true
-              AND name ILIKE $1
-            LIMIT 20
-        """, f"%{product_text}%")
+    # ── Layer 1: LIKE substring match (case-insensitive via COLLATE NOCASE) ──
+    rows = await _fetch_rows("""
+        SELECT product_id, name, order_unit, min_order_qty
+        FROM products
+        WHERE is_active = 1
+          AND name LIKE ? COLLATE NOCASE
+        LIMIT 20
+    """, (f"%{product_text}%",))
 
-    # ── Layer 2: Word-level ILIKE ─────────────────────────────────────────
+    # ── Layer 2: Word-level LIKE ─────────────────────────────────────────
     if not rows:
         words = [w for w in product_text.split() if len(w) >= 3]
         if words:
-            async with pool.acquire() as conn:
-                query_conds = " AND ".join(f"name ILIKE ${i+1}" for i in range(len(words)))
-                params = [f"%{w}%" for w in words]
-                
-                rows = await conn.fetch(f"""
-                    SELECT product_id, name, order_unit, min_order_qty FROM products
-                    WHERE is_active = true AND {query_conds}
-                    LIMIT 20
-                """, *params)
+            query_conds = " AND ".join(f"name LIKE ? COLLATE NOCASE" for _ in words)
+            params = tuple(f"%{w}%" for w in words)
+            
+            rows = await _fetch_rows(f"""
+                SELECT product_id, name, order_unit, min_order_qty FROM products
+                WHERE is_active = 1 AND {query_conds}
+                LIMIT 20
+            """, params)
 
     # ── Layer 3: Difflib fuzzy (CPU-bound, runs in thread pool) ───────────
     if not rows:
-        async with pool.acquire() as conn:
-            if allowed:
-                all_products = await conn.fetch("""
-                    SELECT product_id, name, order_unit, min_order_qty FROM products
-                    WHERE is_active = true AND product_id = ANY($1::int[])
-                """, list(allowed))
-            else:
-                all_products = await conn.fetch("""
-                    SELECT product_id, name, order_unit, min_order_qty FROM products
-                    WHERE is_active = true LIMIT 500
-                """)
+        if allowed:
+            placeholders = ",".join("?" for _ in allowed)
+            all_products = await _fetch_rows(f"""
+                SELECT product_id, name, order_unit, min_order_qty FROM products
+                WHERE is_active = 1 AND product_id IN ({placeholders})
+            """, tuple(allowed))
+        else:
+            all_products = await _fetch_rows("""
+                SELECT product_id, name, order_unit, min_order_qty FROM products
+                WHERE is_active = 1 LIMIT 500
+            """)
 
         if not all_products:
             return {"status": "not_found", "alternatives": []}
 
-        product_dicts = [dict(r) for r in all_products]
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(
             None,
-            partial(_difflib_fuzzy_match, product_text, product_dicts, 0.40)
+            partial(_difflib_fuzzy_match, product_text, all_products, 0.40)
         )
         rows = rows[:20]
 
@@ -299,8 +292,6 @@ async def resolve_product(customer_id: int, query: str) -> dict:
         if unit_match:
             unit_filtered = unit_match
     elif qty is not None:
-        # Smart deduction: If the user provides a pure number without a unit (e.g., "5 lemons"),
-        # and there is an "each" or "ea" variant available, instinctively prefer that variant.
         ea_variants = [
             r for r in filtered
             if r["order_unit"] and any(u in r["order_unit"].lower() for u in ["ea", "each", "piece", "pc"])
@@ -318,7 +309,6 @@ async def resolve_product(customer_id: int, query: str) -> dict:
 
     # Step 7: Resolution decision
     if len(family_groups) == 1:
-        # Only one family matched. Let's see how many variants
         family_key = list(family_groups.keys())[0]
         candidates = family_groups[family_key]
         
@@ -328,7 +318,6 @@ async def resolve_product(customer_id: int, query: str) -> dict:
             if qty is not None and factor:
                 norm_qty = round(qty * factor, 4)
 
-            # Whole-unit fraction check
             if norm_unit in WHOLE_UNITS and qty is not None and qty != int(qty):
                 return {
                     "status": "matched",
@@ -340,20 +329,15 @@ async def resolve_product(customer_id: int, query: str) -> dict:
                     "message": f"'{product['order_unit']}' can only be ordered in whole numbers, not fractions."
                 }
 
-            # Step / Min Quantity multiple check
             min_qty = product.get("min_order_qty")
-            # Ensure it is a valid float
             try:
                 min_qty = float(min_qty) if min_qty is not None else 1.0
             except (ValueError, TypeError):
                 min_qty = 1.0
                 
             if norm_qty is not None and min_qty > 0:
-                # Check if norm_qty is a multiple of min_qty
-                # Use round to avoid floating point imprecision
                 remainder = round((norm_qty % min_qty), 4)
                 if remainder != 0 and remainder != min_qty:
-                    # Not a proper multiple
                     return {
                         "status": "matched",
                         "matched": True,
@@ -375,7 +359,6 @@ async def resolve_product(customer_id: int, query: str) -> dict:
                 "confidence": 0.95,
             }
         else:
-            # Multiple variants in ONE family
             options = [
                 {"product_id": r["product_id"], "name": r["name"], "unit": r["order_unit"] or ""}
                 for r in candidates[:8]
@@ -386,11 +369,10 @@ async def resolve_product(customer_id: int, query: str) -> dict:
                 "options": options,
             }
             
-    # If MULTIPLE families matched (e.g. fuzzy match gave Kale, Apple, Pineapple)
-    # We should return the top option from each family to let the user clarify what they meant.
+    # Multiple families matched
     options = []
     for family, cands in list(family_groups.items())[:8]:
-        r = cands[0] # Pick the best matching variant from this family
+        r = cands[0]
         options.append({
             "product_id": r["product_id"], 
             "name": r["name"], 
@@ -402,4 +384,3 @@ async def resolve_product(customer_id: int, query: str) -> dict:
         "product_family": "MULTIPLE_FAMILIES_MATCHED",
         "options": options,
     }
-

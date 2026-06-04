@@ -3,63 +3,61 @@ import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.database import create_pool, get_pool, close_pool
+from core.database import init_db, get_db, close_db
 
 async def recreate_db():
-    print("Connecting to DB...")
-    await create_pool()
-    pool = get_pool()
-    
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            print("Dropping old tables...")
-            await conn.execute("DROP TABLE IF EXISTS customer_allowed_products CASCADE;")
-            await conn.execute("DROP TABLE IF EXISTS products CASCADE;")
-            await conn.execute("DROP TABLE IF EXISTS customers CASCADE;")
-            
-            print("Creating customers table...")
-            await conn.execute("""
-                CREATE TABLE customers (
-                    id SERIAL PRIMARY KEY,
-                    customer_id INTEGER UNIQUE NOT NULL,
-                    business_name VARCHAR(255) NOT NULL,
-                    email VARCHAR(255),
-                    phone_number VARCHAR(20),
-                    allowed_products INTEGER[],
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE INDEX idx_customer_phone ON customers (phone_number);
-            """)
+    print("Connecting to SQLite DB...")
+    await init_db()
+    db = get_db()
 
-            print("Creating products table...")
-            await conn.execute("""
-                CREATE TABLE products (
-                    id SERIAL PRIMARY KEY,
-                    product_id INTEGER UNIQUE NOT NULL,
-                    product_code VARCHAR(100),
-                    name VARCHAR(255) NOT NULL,
-                    description TEXT,
-                    image TEXT,
-                    cat_id VARCHAR(50),
-                    base_unit_id INTEGER,
-                    order_unit_id INTEGER,
-                    category VARCHAR(100),
-                    base_unit VARCHAR(20),
-                    order_unit VARCHAR(20),
-                    min_order_qty NUMERIC(10,2),
-                    max_order_qty NUMERIC(10,2),
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE INDEX idx_product_name ON products (name);
-            """)
+    print("Dropping old tables...")
+    await db.execute("DROP TABLE IF EXISTS products")
+    await db.execute("DROP TABLE IF EXISTS customers")
 
-            print("Schema recreated successfully!")
+    print("Creating customers table...")
+    await db.execute("""
+        CREATE TABLE customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER UNIQUE NOT NULL,
+            business_name TEXT NOT NULL,
+            email TEXT,
+            phone_number TEXT,
+            allowed_products TEXT DEFAULT '[]',
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_customer_business ON customers (business_name COLLATE NOCASE)")
 
-    await close_pool()
+    print("Creating products table...")
+    await db.execute("""
+        CREATE TABLE products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER UNIQUE NOT NULL,
+            product_code TEXT,
+            name TEXT NOT NULL,
+            description TEXT,
+            image TEXT,
+            cat_id TEXT,
+            base_unit_id INTEGER,
+            order_unit_id INTEGER,
+            category TEXT,
+            base_unit TEXT,
+            order_unit TEXT,
+            min_order_qty REAL,
+            max_order_qty REAL,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_product_name ON products (name COLLATE NOCASE)")
+
+    await db.commit()
+    print("Schema recreated successfully!")
+
+    await close_db()
 
 if __name__ == "__main__":
     asyncio.run(recreate_db())

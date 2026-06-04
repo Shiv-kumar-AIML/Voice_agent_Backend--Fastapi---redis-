@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.database import create_pool, close_pool
+from core.database import init_db, close_db
 from core.redis_client import create_redis, close_redis
 from core.config import VAPI_API_KEY, ASSISTANT_ID
 
@@ -23,20 +23,20 @@ _FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "frontend")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────
-    await create_pool()
+    await init_db()
     await create_redis()
-    print("✅ Database pool and Redis connected")
+    print("✅ SQLite database and Redis connected")
     yield
     # ── Shutdown ─────────────────────────────────────────────────
-    await close_pool()
+    await close_db()
     await close_redis()
-    print("🛑 Database pool and Redis closed")
+    print("🛑 SQLite database and Redis closed")
 
 
 app = FastAPI(
     title="Voice Agent Backend",
     description="FastAPI backend for Vapi B2B voice ordering agent",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -59,7 +59,7 @@ app.include_router(order_router)
 # ── Health Check ─────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok", "version": "3.0.0"}
 
 
 # ── Serve Frontend UI ────────────────────────────────────────────
@@ -73,7 +73,6 @@ def serve_ui():
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
 
-    # Inject environment credentials (never hardcoded)
     html = html.replace("__VAPI_PUBLIC_KEY__", VAPI_API_KEY or "")
     html = html.replace("__VAPI_ASSISTANT_ID__", ASSISTANT_ID or "")
     return HTMLResponse(html)
